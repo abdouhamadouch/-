@@ -651,28 +651,158 @@ async def do_play(
             await delete_safely(message)
 
 
-HELP_TEXT = """🎵 **Mediabot — أوامر التشغيل / Playback commands**
+HELP_TEXT = """🎵 **Mediabot — مساعدك للصوت والفيديو**
 
-`/play <اسم أو رابط>` أو `تشغيل <اسم أو رابط>` — تشغيل الصوت / Play audio
-`/video <اسم أو رابط>` أو `فيديو <اسم أو رابط>` — بث الفيديو / Play video
-`/queue` أو `قائمة` — قائمة الانتظار / Queue
-`/now` أو `الآن` — المقطع الحالي / Now playing
-`/next` أو `التالي` — التالي / Next
-`/pause` أو `إيقاف_مؤقت` — إيقاف مؤقت / Pause
-`/resume` أو `استئناف` — استئناف / Resume
-`/back` أو `رجوع` — الرجوع 10 ثوانٍ / Back 10 seconds
-`/forward` أو `تقديم` — التقديم 10 ثوانٍ / Forward 10 seconds
-`/stop` أو `إيقاف` — إيقاف التشغيل / Stop playback
-`/leave` أو `مغادرة` — مغادرة المكالمة / Leave call
+**في الخاص / In private chat**
+• `/play <اسم أو رابط>` — تنزيل الصوت وإرساله إليك هنا.
+• `/video <رابط أو اسم>` — تنزيل الفيديو وإرساله داخل المحادثة.
+• يمكنك أيضًا الرد على ملف صوتي أو فيديو أرسلته للبوت بكلمة `تشغيل` أو `فيديو`.
 
-يمكن إرسال الأوامر بشرطة مائلة أو دونها.
-Commands may be sent with or without `/`.
+**في المجموعات / In groups**
+• `/play <اسم أو رابط>` — تشغيل الصوت داخل المكالمة الجماعية.
+• `/video <رابط أو اسم>` — تشغيل الفيديو والصوت داخل المكالمة.
+• `/queue` و`/now` — عرض قائمة الانتظار والمقطع الحالي.
+• `/pause` و`/resume` — إيقاف التشغيل مؤقتًا واستئنافه.
+• `/back` و`/forward` — الرجوع أو التقديم 10 ثوانٍ.
+• `/next` و`/stop` و`/leave` — تخطي المقطع أو إيقاف التشغيل أو مغادرة المكالمة.
 
-لتشغيل ملف من تيليجرام: ردّ على رسالة الصوت أو الفيديو بالأمر `تشغيل` أو `فيديو`.
-To play Telegram media: reply to an audio/video message with `play` or `video`.
+**ملاحظات**
+في الخاص، تُرسل الوسائط كرسائل تيليجرام؛ استخدم مشغّل تيليجرام للتحكم في تشغيلها. لا يستطيع البوت إيقاف تشغيل الوسائط بعد إرسالها.
+في المجموعات، يلزم وجود مكالمة صوتية/مرئية نشطة والسماح للحساب المساعد بالانضمام.
 
-يجب أن تكون هناك محادثة صوتية/مرئية نشطة، وأن يكون الحساب المساعد قادرًا على الانضمام.
-A group voice/video chat must be active and the assistant account must be allowed to join."""
+You can send commands with or without a leading slash. Private-chat media is delivered as Telegram messages; use Telegram's media player controls. Group-call playback requires an active group call."""
+
+
+async def do_play_private(
+    message: Message,
+    query: str,
+    video: bool,
+) -> None:
+    """Resolve a media item and send it as a Telegram message in private chat."""
+    chat_id = message.chat.id
+    status = await bot.send_message(
+        chat_id,
+        "⏳ أجهّز الوسائط الآن؛ قد يستغرق تنزيل الفيديو بعض الوقت.\n"
+        "Preparing your media; video downloads may take a little while.",
+    )
+    track: Optional[Track] = None
+    try:
+        source_message = (
+            message.reply_to_message
+            if message.reply_to_message
+            and any(
+                getattr(message.reply_to_message, attr, None) is not None
+                for attr in ("audio", "voice", "video", "video_note", "animation", "document")
+            )
+            else None
+        )
+        if not query and source_message is None:
+            raise ValueError(
+                "أرسل اسم المقطع أو رابطه، أو ردّ على رسالة تحتوي صوتًا أو فيديو.\n"
+                "Send a media name/URL or reply to an audio/video message."
+            )
+
+        requester = message.from_user.first_name if message.from_user else "User"
+        if source_message is not None:
+            is_video, media, title, duration = telegram_media_kind(source_message)
+            size = getattr(media, "file_size", 0) or 0
+            if size > MAX_TELEGRAM_MEDIA_MB * 1024 * 1024:
+                raise ValueError(
+                    f"حجم الملف يتجاوز الحد المضبوط ({MAX_TELEGRAM_MEDIA_MB} MB). "
+                    "اختر ملفًا أصغر. / Telegram media exceeds the configured size limit."
+                )
+            local_path = await bot.download_media(
+                source_message,
+                file_name=str(MEDIA_DIR) + os.sep,
+            )
+            if not local_path or not os.path.isfile(local_path):
+                raise ValueError(
+                    "لم أتمكن من تنزيل الملف المرفق. تأكد أنه ما زال متاحًا ثم أعد المحاولة.\n"
+                    "Could not download the attached file; please try again."
+                )
+            track = Track(
+                query="Telegram attachment",
+                title=title,
+                stream_url=str(local_path),
+                webpage_url=getattr(source_message, "link", None) or "https://t.me/",
+                duration=duration,
+                video=is_video,
+                requested_by=requester[:80],
+                local_file=str(local_path),
+            )
+        else:
+            track = await asyncio.to_thread(
+                get_track_info, query, video, requester
+            )
+
+        path = Path(track.local_file or track.stream_url)
+        if not path.is_file():
+            raise ValueError(
+                "لم يُعثر على ملف الوسائط بعد التجهيز. أعد المحاولة برابط آخر.\n"
+                "The prepared media file is missing; please try another URL."
+            )
+
+        size_mb = path.stat().st_size / (1024 * 1024)
+        # Cloud Bot API upload limit is commonly 50 MB; stay below it for reliability.
+        private_limit_mb = max(1, min(49, int(os.getenv("MAX_PRIVATE_UPLOAD_MB", "45"))))
+        if size_mb > private_limit_mb:
+            raise ValueError(
+                f"حجم الملف {size_mb:.1f} MB، والحد الآمن للإرسال في الخاص "
+                f"{private_limit_mb} MB. اختر مقطعًا أقصر أو اضبط MAX_PRIVATE_UPLOAD_MB.\n"
+                "The file exceeds the configured private-upload limit."
+            )
+
+        caption = (
+            f"{'🎬' if track.video else '🎵'} {track.title[:900]}\n"
+            f"المدة: {fmt_duration(track.duration)}\n"
+            "أُرسل إليك الملف؛ استخدم أدوات مشغّل تيليجرام للتحكم في تشغيله."
+        )
+        if track.video:
+            await bot.send_video(
+                chat_id,
+                video=str(path),
+                caption=caption,
+                supports_streaming=True,
+            )
+        else:
+            await bot.send_audio(
+                chat_id,
+                audio=str(path),
+                title=track.title[:64],
+                caption=caption,
+            )
+        log.info("Private media sent: type=%s size_mb=%.1f", "video" if track.video else "audio", size_mb)
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        await bot.send_message(
+            chat_id,
+            "✅ تم إرسال الملف بنجاح. يمكنك تشغيله أو تنزيله من الرسالة السابقة.\n"
+            "Media sent successfully. Use the Telegram player in the previous message.",
+        )
+    except Exception as exc:
+        log.exception("Private media delivery failed")
+        friendly = str(exc)
+        if "ffmpeg" in friendly.lower():
+            friendly = "يبدو أن FFmpeg غير متاح لمعالجة هذا المقطع. تحقق من تثبيته في بيئة التشغيل. / FFmpeg may be unavailable."
+        elif "max_filesize" in friendly.lower() or "file is larger" in friendly.lower():
+            friendly = "المقطع أكبر من الحد المسموح للتنزيل. جرّب مقطعًا أقصر. / The media exceeds the download limit."
+        await bot.send_message(
+            chat_id,
+            "❌ لم أتمكن من إرسال الوسائط.\n"
+            f"السبب: {friendly[:500]}\n\n"
+            "جرّب رابطًا مباشرًا لمقطع واحد، أو ملفًا أصغر، ثم أعد المحاولة.\n"
+            "Try a single media URL or a smaller file, then retry.",
+        )
+        try:
+            await status.delete()
+        except Exception:
+            pass
+    finally:
+        cleanup_track_file(track)
+        if CLEAN_COMMANDS:
+            await delete_safely(message)
 
 
 async def command_handler(
@@ -690,13 +820,16 @@ async def command_handler(
     if message.chat.type == ChatType.PRIVATE:
         if cmd == "help":
             await send_status(message.chat.id, HELP_TEXT)
-        else:
+        elif cmd in ("play", "video"):
+            await do_play_private(message, arg, cmd == "video")
+        elif cmd in ("pause", "resume", "back", "forward", "next", "stop", "leave", "queue", "now"):
             await send_status(
                 message.chat.id,
-                "أهلًا بك! يعمل تشغيل الصوت والفيديو داخل المجموعات فقط، "
-                "أما /start و /help فيعملان هنا.\n\n"
-                "Welcome! Audio/video playback commands work in groups only; "
-                "/start and /help are available here.",
+                "ℹ️ في المحادثة الخاصة أرسل إليك البوت ملف الوسائط، ولا يشغّله داخل مكالمة. "
+                "لذلك لا تنطبق أزرار الإيقاف المؤقت والتقديم وقائمة تشغيل المكالمات هنا؛ "
+                "استخدم أدوات مشغّل تيليجرام للتحكم في الملف المرسل.\n\n"
+                "Private chat sends media as a Telegram message, not a live call. "
+                "Use Telegram's media player controls; group-call controls apply in groups.",
             )
         return
 

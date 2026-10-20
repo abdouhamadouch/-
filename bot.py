@@ -1290,6 +1290,19 @@ async def main() -> None:
     try:
         runner = await start_health_server()
 
+        # Give Render time to route health checks and retire the previous instance
+        # before opening the same Telegram user session during a rolling deployment.
+        session_start_delay = max(
+            0.0,
+            float(os.getenv("SESSION_START_DELAY_SECONDS", "15")),
+        )
+        if session_start_delay:
+            log.info(
+                "Waiting %.1f seconds before starting the assistant session",
+                session_start_delay,
+            )
+            await asyncio.sleep(session_start_delay)
+
         await assistant.start()
         log.info("Assistant account client started")
 

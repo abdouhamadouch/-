@@ -164,6 +164,13 @@ def get_track_info(query: str, video: bool, requested_by: str) -> Track:
         "retries": 3,
         "fragment_retries": 3,
     }
+    if not video:
+        # Telegram's send_audio expects a supported audio container; normalize to MP3.
+        opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "128",
+        }]
     opts = {key: value for key, value in opts.items() if value is not None}
 
     try:
@@ -1174,8 +1181,8 @@ async def main() -> None:
                 [
                     BotCommand("start", "بدء البوت / Start"),
                     BotCommand("help", "عرض المساعدة والأوامر / Help"),
-                    BotCommand("play", "تشغيل الصوت في المجموعة / Play audio"),
-                    BotCommand("video", "تشغيل الفيديو في المجموعة / Play video"),
+                    BotCommand("play", "صوت: خاص إرسال ملف، مجموعة تشغيل / Play audio"),
+                    BotCommand("video", "فيديو: خاص إرسال ملف، مجموعة بث / Play video"),
                     BotCommand("queue", "عرض قائمة الانتظار / Show queue"),
                     BotCommand("now", "المقطع الحالي / Now playing"),
                     BotCommand("pause", "إيقاف مؤقت / Pause"),

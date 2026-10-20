@@ -824,6 +824,14 @@ async def command_handler(
     if not cmd:
         return
 
+    log.info(
+        "Recognized command=%s | chat_type=%s | chat_id=%s | user_id=%s",
+        cmd,
+        message.chat.type,
+        message.chat.id,
+        message.from_user.id if message.from_user else None,
+    )
+
     if message.chat.type == ChatType.PRIVATE:
         if cmd == "help":
             await send_status(message.chat.id, HELP_TEXT)
@@ -1036,7 +1044,36 @@ async def on_group_text(
     client: Client,
     message: Message,
 ) -> None:
-    await command_handler(client, message)
+    # Log private-chat messages and slash commands without recording message contents.
+    if (
+        message.chat.type == ChatType.PRIVATE
+        or (message.text and message.text.lstrip().startswith("/"))
+    ):
+        log.info(
+            "Telegram text update received | chat_type=%s | chat_id=%s | user_id=%s | message_id=%s",
+            message.chat.type,
+            message.chat.id,
+            message.from_user.id if message.from_user else None,
+            message.id,
+        )
+
+    try:
+        await command_handler(client, message)
+    except Exception:
+        log.exception(
+            "Unhandled Telegram message error | chat_type=%s | chat_id=%s | message_id=%s",
+            message.chat.type,
+            message.chat.id,
+            message.id,
+        )
+        try:
+            await bot.send_message(
+                message.chat.id,
+                "⚠️ حدث خطأ أثناء معالجة رسالتك. سُجّل السبب في سجلات التشغيل؛ أعد المحاولة بعد قليل.\n"
+                "An internal error occurred while processing your message. The error was logged.",
+            )
+        except Exception:
+            log.exception("Failed to send message-handler error notice")
 
 
 @bot.on_callback_query()
@@ -1174,7 +1211,12 @@ async def main() -> None:
         log.info("PyTgCalls started")
 
         await bot.start()
-        log.info("Controller bot started")
+        bot_identity = await bot.get_me()
+        log.info(
+            "Controller bot started as @%s (id=%s)",
+            bot_identity.username or "unknown",
+            bot_identity.id,
+        )
 
         try:
             await bot.set_bot_commands(

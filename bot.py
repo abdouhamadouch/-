@@ -19,6 +19,7 @@ from pyrogram.types import (
     InlineKeyboardButton,
     CallbackQuery,
     Message,
+    BotCommand,
 )
 
 from pytgcalls import PyTgCalls, filters as call_filters
@@ -662,16 +663,28 @@ async def command_handler(
     _: Client,
     message: Message,
 ) -> None:
-    if (
-        not message.text
-        or message.chat.type
-        not in (ChatType.GROUP, ChatType.SUPERGROUP)
-    ):
+    if not message.text:
         return
 
     cmd, arg = normalize_command(message.text)
 
     if not cmd:
+        return
+
+    if message.chat.type == ChatType.PRIVATE:
+        if cmd == "help":
+            await send_status(message.chat.id, HELP_TEXT)
+        else:
+            await send_status(
+                message.chat.id,
+                "أهلًا بك! يعمل تشغيل الصوت والفيديو داخل المجموعات فقط، "
+                "أما /start و /help فيعملان هنا.\n\n"
+                "Welcome! Audio/video playback commands work in groups only; "
+                "/start and /help are available here.",
+            )
+        return
+
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
 
     chat_id = message.chat.id
@@ -862,7 +875,7 @@ async def command_handler(
             await delete_safely(message)
 
 
-@bot.on_message(filters.group & filters.text)
+@bot.on_message((filters.group | filters.private) & filters.text)
 async def on_group_text(
     client: Client,
     message: Message,
@@ -1006,6 +1019,26 @@ async def main() -> None:
 
         await bot.start()
         log.info("Controller bot started")
+
+        try:
+            await bot.set_bot_commands(
+                [
+                    BotCommand("start", "بدء البوت / Start"),
+                    BotCommand("help", "عرض المساعدة والأوامر / Help"),
+                    BotCommand("play", "تشغيل الصوت في المجموعة / Play audio"),
+                    BotCommand("video", "تشغيل الفيديو في المجموعة / Play video"),
+                    BotCommand("queue", "عرض قائمة الانتظار / Show queue"),
+                    BotCommand("now", "المقطع الحالي / Now playing"),
+                    BotCommand("pause", "إيقاف مؤقت / Pause"),
+                    BotCommand("resume", "استئناف التشغيل / Resume"),
+                    BotCommand("next", "المقطع التالي / Next"),
+                    BotCommand("stop", "إيقاف التشغيل / Stop"),
+                    BotCommand("leave", "مغادرة المكالمة / Leave call"),
+                ]
+            )
+            log.info("Telegram bot command menu registered")
+        except Exception:
+            log.exception("Could not register Telegram bot command menu")
 
         await asyncio.Event().wait()
 

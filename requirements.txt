@@ -2,5 +2,5 @@
 pyrogrammod==2.4.1
 TgCrypto>=1.2.5
 py-tgcalls==2.3.3
-yt-dlp>=2025.1.15
+yt-dlp[default]>=2026.8.19
 aiohttp>=3.10,<4.0

@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: mediabot-fresh
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+
+    envVars:
+      - key: API_ID
+        sync: false
+
+      - key: API_HASH
+        sync: false
+
+      - key: BOT_TOKEN
+        sync: false
+
+      - key: SESSION_STRING
+        sync: false
+
+      - key: CLEAN_COMMANDS
+        value: "true"
+
+      - key: CLEAN_OLD_STATUS
+        value: "true"
+
+      - key: STATUS_TTL
+        value: "60"
+
+      - key: MAX_QUEUE
+        value: "25"
+
+      - key: MAX_TELEGRAM_MEDIA_MB
+        value: "500"

@@ -5,6 +5,8 @@ import asyncio
 import logging
 import os
 import re
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from collections import defaultdict, deque
@@ -65,6 +67,9 @@ MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_TELEGRAM_MEDIA_MB = max(
     1, int(os.getenv("MAX_TELEGRAM_MEDIA_MB", "500"))
+)
+MAX_YTDLP_DOWNLOAD_MB = max(
+    25, int(os.getenv("MAX_YTDLP_DOWNLOAD_MB", "500"))
 )
 
 bot = Client(
@@ -128,10 +133,12 @@ def fmt_duration(seconds: Optional[int]) -> str:
 
 
 def get_track_info(query: str, video: bool, requested_by: str) -> Track:
+    """Download media locally before playback to avoid fragile/expired stream URLs."""
     if not query:
         raise ValueError(
             "أرسل رابطًا أو اسم المقطع بعد الأمر.\n"
-            "Send a URL or search phrase after the command."
+            "أرسل رابط يوتيوب أو اكتب اسم المقطع بعد الأمر.\n"
+            "Send a YouTube URL or search phrase after the command."
         )
 
     target = (
@@ -139,63 +146,67 @@ def get_track_info(query: str, video: bool, requested_by: str) -> Track:
         if re.match(r"https?://", query, re.I)
         else f"ytsearch1:{query}"
     )
-
+    download_dir = Path(tempfile.mkdtemp(prefix="youtube_", dir=str(MEDIA_DIR)))
     opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "format": "best[ext=mp4]/best" if video else "bestaudio/best",
-        "skip_download": True,
+        "format": (
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+            if video else "bestaudio/best"
+        ),
+        "merge_output_format": "mp4" if video else None,
+        "outtmpl": str(download_dir / "%(title).80s [%(id)s].%(ext)s"),
+        "max_filesize": MAX_YTDLP_DOWNLOAD_MB * 1024 * 1024,
         "default_search": "ytsearch1",
-        "socket_timeout": 20,
-        "extractor_retries": 2,
-        "retries": 2,
+        "socket_timeout": 30,
+        "extractor_retries": 3,
+        "retries": 3,
+        "fragment_retries": 3,
     }
+    opts = {key: value for key, value in opts.items() if value is not None}
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(target, download=False)
-
-        if info and "entries" in info:
-            info = next(
-                (entry for entry in info["entries"] if entry),
-                None,
-            )
-
-        if not info:
-            raise ValueError(
-                "لم أجد مقطعًا صالحًا. / No playable media was found."
-            )
-
-        stream_url = info.get("url")
-
-        if not stream_url:
-            formats = info.get("formats") or []
-            wanted = [
-                item
-                for item in formats
-                if item.get("url")
-                and (video or item.get("acodec") != "none")
-            ]
-
-            if not wanted:
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(target, download=False)
+            if info and "entries" in info:
+                info = next((entry for entry in info["entries"] if entry), None)
+            if not info:
                 raise ValueError(
-                    "تعذّر استخراج رابط البث. / "
-                    "Could not resolve a stream URL."
+                    "لم أجد مقطعًا صالحًا. تحقق من الرابط أو جرّب اسمًا آخر.\n"
+                    "No media found. Check the URL or try another search."
                 )
+            if info.get("_type") == "playlist":
+                raise ValueError("أرسل رابط مقطع واحد، لا قائمة تشغيل. / Please send one video, not a playlist.")
+            title = (info.get("title") or query)[:180]
+            webpage = info.get("webpage_url") or query
+            duration = info.get("duration")
+            ydl.download([target])
 
-            stream_url = wanted[-1]["url"]
-
-        webpage = info.get("webpage_url") or query
-
+        supported = {".mp4", ".m4v", ".mkv", ".webm", ".mov", ".m4a", ".mp3", ".opus", ".ogg", ".aac"}
+        files = [p for p in download_dir.rglob("*") if p.is_file() and p.suffix.lower() in supported and not p.name.endswith((".part", ".ytdl"))]
+        if not files:
+            raise ValueError("انتهى التنزيل دون العثور على ملف وسائط صالح. / Download finished but no media file was found.")
+        local_path = max(files, key=lambda p: p.stat().st_mtime)
+        size_mb = local_path.stat().st_size / (1024 * 1024)
+        if size_mb > MAX_YTDLP_DOWNLOAD_MB:
+            raise ValueError(
+                f"حجم الملف {size_mb:.1f} MB ويتجاوز الحد {MAX_YTDLP_DOWNLOAD_MB} MB. "
+                "جرّب مقطعًا أقصر أو اضبط MAX_YTDLP_DOWNLOAD_MB. / Media exceeds the configured download limit."
+            )
         return Track(
             query=query,
-            title=(info.get("title") or query)[:180],
-            stream_url=stream_url,
+            title=title,
+            stream_url=str(local_path),
             webpage_url=webpage,
-            duration=info.get("duration"),
+            duration=duration,
             video=video,
             requested_by=requested_by[:80],
+            local_file=str(local_path),
         )
+    except Exception:
+        shutil.rmtree(download_dir, ignore_errors=True)
+        raise
 
 
 def stream_for(track: Track, offset: int = 0) -> MediaStream:
@@ -371,8 +382,13 @@ async def resolve_track(
 
 def cleanup_track_file(track: Optional[Track]) -> None:
     if track and track.local_file:
+        path = Path(track.local_file)
         try:
-            Path(track.local_file).unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
+            # YouTube downloads get an isolated child directory; Telegram downloads
+            # remain directly under MEDIA_DIR and must not remove that shared folder.
+            if path.parent != MEDIA_DIR and path.parent.parent == MEDIA_DIR:
+                path.parent.rmdir()
         except OSError as exc:
             log.warning(
                 "Could not remove temporary media file: %s",

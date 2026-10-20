@@ -20,17 +20,7 @@ from pyrogram.types import (
     CallbackQuery,
     Message,
 )
-import pyrogram.errors as pyrogram_errors
 
-if not hasattr(pyrogram_errors, "GroupcallForbidden"):
-    pyrogram_errors.GroupcallForbidden = (
-        pyrogram_errors.GroupCallForbidden
-    )
-
-if not hasattr(pyrogram_errors, "GroupcallInvalid"):
-    pyrogram_errors.GroupcallInvalid = (
-        pyrogram_errors.GroupCallInvalid
-    )
 from pytgcalls import PyTgCalls, filters as call_filters
 from pytgcalls.types import AudioQuality, MediaStream, StreamEnded, VideoQuality
 from commands import normalize_command

@@ -61,6 +61,7 @@ CLEAN_OLD_STATUS = os.getenv(
 
 STATUS_TTL = max(10, int(os.getenv("STATUS_TTL", "60")))
 MAX_QUEUE = max(1, min(100, int(os.getenv("MAX_QUEUE", "25"))))
+PENDING_REQUEST_TTL = max(15, int(os.getenv("PENDING_REQUEST_TTL", "90")))
 
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "/tmp/mediabot_media"))
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
@@ -114,6 +115,9 @@ class Room:
 
 
 rooms: dict[int, Room] = defaultdict(Room)
+# A bare play command can be completed by the same user's next message.
+# The chat and user IDs together prevent capturing another member's request.
+pending_requests: dict[tuple[int, int], tuple[bool, float]] = {}
 
 
 def fmt_duration(seconds: Optional[int]) -> str:
@@ -565,6 +569,33 @@ async def play_next(chat_id: int) -> None:
             asyncio.create_task(play_next(chat_id))
 
 
+def has_supported_media_reply(message: Message) -> bool:
+    """Return whether the replied-to message contains supported audio/video media."""
+    if not message.reply_to_message:
+        return False
+    try:
+        telegram_media_kind(message.reply_to_message)
+        return True
+    except ValueError:
+        return False
+
+
+def friendly_media_error(exc: Exception) -> str:
+    """Turn common upstream extractor failures into actionable user guidance."""
+    detail = str(exc)
+    lowered = detail.lower()
+    if "sign in to confirm" in lowered or "confirm you’re not a bot" in lowered or "confirm you're not a bot" in lowered:
+        return (
+            "رفض يوتيوب الطلب من خادم الاستضافة، لذلك تعذّر جلب هذا المقطع. "
+            "جرّب رابطًا مباشرًا لملف صوت/فيديو من مصدر مسموح، أو أرسل الملف إلى تيليجرام "
+            "ثم استخدم الأمر بالرد على رسالته. لا يمكن ضمان تشغيل كل روابط يوتيوب من الخادم.\n"
+            "YouTube blocked this server request. Try a direct media URL or reply to an audio/video file uploaded to Telegram."
+        )
+    if "ffmpeg" in lowered and ("not found" in lowered or "no such file" in lowered or "not installed" in lowered):
+        return "أداة FFmpeg غير متاحة لمعالجة الملف. / FFmpeg is unavailable for media processing."
+    return detail[:350]
+
+
 async def do_play(
     message: Message,
     query: str,
@@ -650,7 +681,7 @@ async def do_play(
         await send_status(
             chat_id,
             f"❌ تعذّر تجهيز المقطع. / Could not prepare media.\n"
-            f"{str(exc)[:350]}",
+            f"{friendly_media_error(exc)}",
         )
 
     finally:
@@ -795,6 +826,8 @@ async def do_play_private(
             friendly = "يبدو أن FFmpeg غير متاح لمعالجة هذا المقطع. تحقق من تثبيته في بيئة التشغيل. / FFmpeg may be unavailable."
         elif "max_filesize" in friendly.lower() or "file is larger" in friendly.lower():
             friendly = "المقطع أكبر من الحد المسموح للتنزيل. جرّب مقطعًا أقصر. / The media exceeds the download limit."
+        elif "sign in to confirm" in friendly.lower() or "confirm you’re not a bot" in friendly.lower() or "confirm you're not a bot" in friendly.lower():
+            friendly = friendly_media_error(exc)
         await bot.send_message(
             chat_id,
             "❌ لم أتمكن من إرسال الوسائط.\n"
@@ -812,6 +845,30 @@ async def do_play_private(
             await delete_safely(message)
 
 
+async def consume_pending_query(message: Message) -> bool:
+    """Consume the next ordinary text message for a pending play request."""
+    if not message.text or message.text.lstrip().startswith("/") or not message.from_user:
+        return False
+
+    key = (message.chat.id, message.from_user.id)
+    pending = pending_requests.pop(key, None)
+    if not pending:
+        return False
+
+    video, expires_at = pending
+    query_text = message.text.strip()
+    if time.monotonic() > expires_at or not query_text:
+        return False
+
+    if message.chat.type == ChatType.PRIVATE:
+        await do_play_private(message, query_text, video)
+        return True
+    if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await do_play(message, query_text, video)
+        return True
+    return False
+
+
 async def command_handler(
     _: Client,
     message: Message,
@@ -820,9 +877,15 @@ async def command_handler(
         return
 
     cmd, arg = normalize_command(message.text)
+    user_id = message.from_user.id if message.from_user else None
+    pending_key = (message.chat.id, user_id) if user_id is not None else None
 
     if not cmd:
+        await consume_pending_query(message)
         return
+
+    if pending_key is not None and cmd not in ("play", "video"):
+        pending_requests.pop(pending_key, None)
 
     log.info(
         "Recognized command=%s | chat_type=%s | chat_id=%s | user_id=%s",
@@ -831,6 +894,20 @@ async def command_handler(
         message.chat.id,
         message.from_user.id if message.from_user else None,
     )
+
+    if cmd in ("play", "video") and not arg and not has_supported_media_reply(message):
+        if pending_key is not None:
+            pending_requests[pending_key] = (cmd == "video", time.monotonic() + PENDING_REQUEST_TTL)
+            await bot.send_message(
+                message.chat.id,
+                "أرسل الآن اسم المقطع أو رابطه في رسالة تالية خلال "
+                f"{PENDING_REQUEST_TTL} ثانية. / Send the media name or URL in your next message "
+                f"within {PENDING_REQUEST_TTL} seconds.",
+                disable_web_page_preview=True,
+            )
+            if CLEAN_COMMANDS:
+                await delete_safely(message)
+            return
 
     if message.chat.type == ChatType.PRIVATE:
         if cmd == "help":
@@ -1074,6 +1151,15 @@ async def on_group_text(
             )
         except Exception:
             log.exception("Failed to send message-handler error notice")
+
+
+@assistant.on_message((filters.group | filters.private) & filters.text)
+async def on_assistant_pending_text(
+    _: Client,
+    message: Message,
+) -> None:
+    # Userbot receives ordinary group text even when the controller bot's privacy mode hides it.
+    await consume_pending_query(message)
 
 
 @bot.on_callback_query()
